@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Script to pull down copies of saved queries."""
+"""Script to push/pull copies of saved queries."""
 
 import os
 import sys
