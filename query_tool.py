@@ -1,199 +1,300 @@
 #!/usr/bin/env python
 """Script to push/pull copies of saved queries."""
-
 import os
+import pathlib
+import random
 import sys
-import click
-import json
+from typing import List, Union
+
 import axonius_api_client as axonapi
-import logging
+import click
 
-"""Setup Logging"""
-LOG_FMT = "%(asctime)s %(levelname)-8s [%(name)s:%(funcName)s()] %(message)s"
-logging.basicConfig(level=logging.ERROR, format=LOG_FMT)
-LOG = logging.getLogger("query_tool")
-
+NOW = axonapi.tools.dt_now()
+NOW_STR = NOW.strftime("%Y-%m-%dT%H-%M-%S-%Z")
+DEFAULT_PREFIX = f"ax_sq_export_{NOW_STR}"
+LOG = axonapi.LOG
+FIELDS_TO_STRIP = [
+    "archived",
+    "date_fetched",
+    "last_updated",
+    "updated_by",
+    "user_id",
+    "uuid",
+]
 
 """Load variables"""
 axonapi.constants.load_dotenv()
 
-AX_URL = os.environ["AX_URL"]
-AX_KEY = os.environ["AX_KEY"]
-AX_SECRET = os.environ["AX_SECRET"]
 
-
-@click.command()
+@click.command(context_settings={"auto_envvar_prefix": "AX"},)
 @click.option(
-    "--get",
-    "-g",
-    "get",
+    "--export/--import",
+    "-e/-i",
+    "export",
     is_flag=True,
-    help="Flag to get query info. Either get or push is required.",
+    default=None,
+    required=True,
+    help="Exporting or importing queries",
 )
 @click.option(
-    "--push",
-    "-p",
-    "push",
-    is_flag=True,
-    help="Flag to push queries to servers. Either get or push is required.",
-)
-@click.option(
-    "--devices",
-    "-d",
-    "devices",
-    is_flag=True,
-    help="Flag to define asset type of devices",
-)
-@click.option(
-    "--users", "-u", "users", is_flag=True, help="Flag to define asset type of users",
-)
-@click.option(
-    "--ax-queries",
+    "--asset-type",
     "-a",
-    "ax",
-    is_flag=True,
-    help="(Optional) Pull Axonius built queries only",
+    "asset_type",
+    required=True,
+    show_default=True,
+    type=click.Choice(["users", "devices"]),
+    help="Type of assets to export saved queries for.",
 )
 @click.option(
-    "--tag",
+    "--name-prefix",
+    "-np",
+    "name_prefix",
+    default="",
+    required=False,
+    show_default=True,
+    show_envvar=True,
+    help="Pull queries that match a defined prefix.",
+)
+@click.option(
+    "--tags",
     "-t",
     "tags",
-    default=[],
-    multiple=True,
-    help="(Optional) Define tags to pull queries by.",
+    default="",
+    metavar="CSV of tags",
+    required=False,
+    show_default=True,
+    show_envvar=True,
+    help="Define tags to pull queries by.",
 )
 @click.option(
-    "--path",
-    "-p",
-    "path",
-    default="",
-    help="(Optional) Define directory path to push or pull from. \
-    Local directory by default.",
+    "--import-path",
+    "-ip",
+    "import_path",
+    type=click.Path(exists=True, resolve_path=True),
+    help="Define directory or single file to import from.",
+    required=False,
+    show_default=True,
+    show_envvar=True,
 )
-def start(tags, path, get, push, devices, users, ax):
+@click.option(
+    "--export-path",
+    "-xp",
+    "export_path",
+    default=os.getcwd(),
+    type=click.Path(file_okay=False, dir_okay=True, resolve_path=True),
+    help="Define directory path to export to.",
+    show_default=True,
+    show_envvar=True,
+)
+@click.option(
+    "--export-prefix",
+    "-xp",
+    "export_prefix",
+    default=DEFAULT_PREFIX,
+    help="Prefix to use on exported files.",
+    show_default=True,
+    show_envvar=True,
+)
+@click.option(
+    "--single-file/--no-single-file",
+    "-sf/-nsf",
+    "single_file",
+    default=True,
+    help="Export queries to a single file or a folder with a file for each query",
+    show_default=True,
+    show_envvar=True,
+)
+@click.option(
+    "--url",
+    "-u",
+    "url",
+    required=True,
+    help="URL of an Axonius instance",
+    metavar="URL",
+    prompt="URL",
+    show_envvar=True,
+    show_default=True,
+)
+@click.option(
+    "--key",
+    "-k",
+    "key",
+    required=True,
+    help="API Key of user in an Axonius instance",
+    metavar="KEY",
+    prompt="API Key of user",
+    hide_input=True,
+    show_envvar=True,
+    show_default=True,
+)
+@click.option(
+    "--secret",
+    "-s",
+    "secret",
+    required=True,
+    help="API Secret of user in an Axonius instance",
+    metavar="SECRET",
+    prompt="API Secret of user",
+    hide_input=True,
+    show_envvar=True,
+    show_default=True,
+)
+def cli(
+    url: str,
+    key: str,
+    secret: str,
+    tags: str,
+    asset_type: str,
+    export: bool,
+    name_prefix: bool,
+    export_path: Union[str, pathlib.Path],
+    export_prefix: str,
+    import_path: Union[str, pathlib.Path],
+    single_file: bool,
+):
     """Start data gathering."""
-    asset_type = get_asset_type(devices=devices, users=users)
+    tags = tags or ""
+    tags = [x.strip() for x in tags.strip().split(",") if x.strip()]
 
-    if get:
-        sq_data = find_targets(tags=tags, asset_type=asset_type)
-        if ax:
-            find_ax_queries(sq_data=sq_data, path=path)
-        else:
-            for data in sq_data:
-                write_data(data=data, path=path)
-    elif push:
-        add_sq(path=path)
+    ctx = axonapi.Connect(
+        url=url,
+        key=key,
+        secret=secret,
+        certwarn=False,
+        log_console=True,
+        log_level_console="error",
+    )
+    ctx.start()
+
+    api_obj = getattr(ctx, asset_type)
+
+    if export:
+        do_export(
+            api_obj=api_obj,
+            tags=tags,
+            name_prefix=name_prefix,
+            path=export_path,
+            single_file=single_file,
+            export_prefix=export_prefix,
+        )
     else:
-        sys.exit("No option to --push or --get specified")
+        do_import(api_obj=api_obj, path=import_path)
 
 
-def get_asset_type(devices, users):
-    """Determine asset type."""
-    if devices:
-        asset_type = ctx.devices
-    elif users:
-        asset_type = ctx.users
+def do_import(
+    api_obj: axonapi.api.assets.asset_mixin.AssetMixin, path: Union[str, pathlib.Path],
+):
+    """Diaf."""
+    if not path:
+        click.secho(message="import path must be supplied!", err=True, fg="red")
+        sys.exit(1)
+
+    fq_path = pathlib.Path(path)
+
+    sqs_to_add = []
+
+    if fq_path.is_file():
+        if not fq_path.suffix == ".json":
+            click.secho(message="not a json file!", err=True, fg="red")
+            sys.exit(1)
+
+        sqs = axonapi.tools.path_read(obj=fq_path, is_json=True)
+        sqs_to_add += sqs
+    elif fq_path.is_dir():
+        sq_files = [x for x in fq_path.iterdir() if x.suffix == ".json"]
+        if not sq_files:
+            click.secho(message="no json files found!", err=True, fg="red")
+            sys.exit(1)
+
+        for sq_file in sq_files:
+            sq_path, sq = axonapi.tools.path_read(obj=sq_file, is_json=True)
+            sqs_to_add.append(sq)
     else:
-        sys.exit("No asset type of devices or users defined")
+        click.secho(message="DIAF", err=True, fg="red")
+        sys.exit(1)
 
-    return asset_type
+    existing_sqs = api_obj.saved_query.get()
+    existing_names = [x["name"] for x in existing_sqs]
 
+    for sq in sqs_to_add:
+        name = sq["name"]
 
-def ax_connect(url, key, secret):
-    """Connect to Axonius."""
-    try:
-        ctx = axonapi.Connect(url=url, key=key, secret=secret, certwarn=False)
-        ctx.start()
-        return ctx
-    except Exception:
-        LOG.exception("Error connecting to Axonius instance")
-        exit(1)
+        if name in existing_names:
+            # add option to delete and re-add, until update method comes out
+            click.secho(
+                message=f"Saved query {name} already exists! Skipping..",
+                err=True,
+                fg="yellow",
+            )
+            continue
 
-
-def find_targets(tags, asset_type):
-    """Determine if tags were provided."""
-    try:
-        if tags == ():
-            sq_data = sq_get_all(asset_type=asset_type)
-            return sq_data
-        else:
-            sq_data = sq_by_tag(tags=tags, asset_type=asset_type)
-            return sq_data
-    except Exception:
-        LOG.exception("Error parsing tags/target")
-        exit(1)
+        [sq.pop(x, None) for x in FIELDS_TO_STRIP]
+        uuid = api_obj.saved_query._add(data=sq)
+        click.secho(
+            message=f"Created saved query {name} with uuid {uuid}", err=True, fg="green",
+        )
 
 
-def sq_get_all(asset_type):
-    """Get all saved queries."""
-    try:
-        sq_data = asset_type.saved_query.get()
-        return sq_data
-    except Exception:
-        LOG.exception("Error retrieving saved query data")
-        exit(1)
+def do_export(
+    api_obj: axonapi.api.assets.asset_mixin.AssetMixin,
+    tags: List[str],
+    name_prefix: str,
+    path: Union[str, pathlib.Path],
+    export_prefix: str,
+    single_file: bool,
+):
+    """Diaf."""
+    sqs = api_obj.saved_query.get()
+
+    if name_prefix:
+        known = [x["name"] for x in sqs]
+        known = "\n".join(known)
+        sqs = [sq for sq in sqs if sq["name"].startswith(name_prefix)]
+
+        if not sqs:
+            click.secho(
+                message=f"NO SQs beginning with {name_prefix}, known names:\n{known}",
+                err=True,
+                fg="red",
+            )
+            sys.exit(1)
+
+    if tags:
+        known = []
+        for sq in sqs:
+            known += sq.get("tags", [])
+        known = "\n".join(list(set(known)))
+        sqs = [sq for sq in sqs if any([tag in sq.get("tags", []) for tag in tags])]
+
+        if not sqs:
+            click.secho(
+                message=f"NO SQs with tags {list(tags)}, known tags:\n{known}",
+                err=True,
+                fg="red",
+            )
+            sys.exit(1)
+
+    dest_path = pathlib.Path(path)
+
+    if single_file:
+        dest_file = f"{export_prefix}.json"
+        full_dest_path = dest_path / dest_file
+        axonapi.tools.path_write(obj=full_dest_path, data=sqs, is_json=True)
+        click.secho(
+            message=f"Wrote {len(sqs)} SQs to {full_dest_path}", err=True, fg="green"
+        )
+    else:
+        for sq in sqs:
+            name = sq["name"]
+            safe_name = "".join([x for x in name if x.isalnum() or x in [" ", "-"]])
+            dest_file = f"{safe_name}.json"
+            full_dest_path = dest_path / export_prefix / dest_file
+            if full_dest_path.is_file():
+                rand = random.randint(0, 999999)
+                full_dest_path = dest_path / export_prefix / f"{safe_name}_{rand}.json"
+            axonapi.tools.path_write(obj=full_dest_path, data=sq, is_json=True)
+            click.secho(message=f"Wrote {full_dest_path}", err=True, fg="green")
 
 
-def sq_by_tag(tags, asset_type):
-    """Get saved query data."""
-    try:
-        for tag in tags:
-            sq_data = asset_type.saved_query.get_by_tags(value=tags)
-            return sq_data
-    except Exception:
-        LOG.exception("Error retrieving saved query data")
-        exit(1)
-
-
-def find_ax_queries(sq_data, path):
-    """Fine AX Queries."""
-    try:
-        for data in sq_data:
-            if "AX -" in data["name"]:
-                write_data(data=data, path=path)
-            else:
-                continue
-    except Exception:
-        LOG.exception("Error finding AX queries")
-        exit(1)
-
-
-def write_data(data, path):
-    """Write queries to a file."""
-    try:
-        name = data["name"]
-        filename = f"{path}{name}.json"
-
-        with open(filename, "w") as outfile:
-            outfile.write(axonapi.tools.json_reload(data))
-    except Exception:
-        LOG.exception("Error writing queries to file")
-        exit(1)
-
-
-def add_sq(path):
-    """Create saved queries from files."""
-    try:
-        if path == "":
-            list_path = "."
-        else:
-            list_path = path
-
-        for file in os.listdir(list_path):
-            if file.endswith(".json"):
-                sq_data = load_json(file=file, path=path)
-                ctx.devices.saved_query._add(data=sq_data)
-    except Exception:
-        LOG.exception("Error writing queries from file")
-        exit(1)
-
-
-def load_json(file, path):
-    """Load JSON data from file."""
-    with open(f"{path}{file}") as file:
-        data = json.load(file)
-        return data
-
-
-ctx = ax_connect(url=AX_URL, key=AX_KEY, secret=AX_SECRET)
-start()
+if __name__ == "__main__":
+    cli()
