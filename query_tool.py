@@ -198,8 +198,8 @@ def do_import(
             click.secho(message="not a json file!", err=True, fg="red")
             sys.exit(1)
 
-        sqs = axonapi.tools.path_read(obj=fq_path, is_json=True)
-        sqs_to_add += sqs
+        resolved_path, content = axonapi.tools.path_read(obj=fq_path, is_json=True)
+        sqs_to_add += content
     elif fq_path.is_dir():
         sq_files = [x for x in fq_path.iterdir() if x.suffix == ".json"]
         if not sq_files:
@@ -207,17 +207,17 @@ def do_import(
             sys.exit(1)
 
         for sq_file in sq_files:
-            sq_path, sq = axonapi.tools.path_read(obj=sq_file, is_json=True)
-            sqs_to_add.append(sq)
+            resolved_path, content = axonapi.tools.path_read(obj=sq_file, is_json=True)
+            sqs_to_add.append(content)
     else:
-        click.secho(message="DIAF", err=True, fg="red")
+        click.secho(message="Valid file or directory not specified", err=True, fg="red")
         sys.exit(1)
 
     existing_sqs = api_obj.saved_query.get()
     existing_names = [x["name"] for x in existing_sqs]
 
-    for sq in sqs_to_add:
-        name = sq["name"]
+    for sq_to_add in sqs_to_add:
+        name = sq_to_add["name"]
 
         if name in existing_names:
             # add option to delete and re-add, until update method comes out
@@ -228,8 +228,8 @@ def do_import(
             )
             continue
 
-        [sq.pop(x, None) for x in FIELDS_TO_STRIP]
-        uuid = api_obj.saved_query._add(data=sq)
+        [sq_to_add.pop(x, None) for x in FIELDS_TO_STRIP]
+        uuid = api_obj.saved_query._add(data=sq_to_add)
         click.secho(
             message=f"Created saved query {name} with uuid {uuid}", err=True, fg="green",
         )
